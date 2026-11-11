@@ -1,6 +1,7 @@
 """Look at an unknown database and propose a ``patterniq.toml``.
 
-Read-only: only reads catalog metadata plus min/max/count of the candidate timestamp column.
+Read-only: only reads catalog metadata, min/max/count of the candidate timestamp column and the
+distinct values of any timeframe / symbol column (so the suggested config can map them).
 """
 
 from __future__ import annotations
@@ -35,7 +36,36 @@ class TableInfo:
     symbol_column: str | None = None
     volume_column: str | None = None
     ts_type: str | None = None
+    timeframe_values: list[str] = field(default_factory=list)
+    symbol_values: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+
+_TF_RX = re.compile(r"^(?:m(?P<pre>\d+)|(?P<n>\d+)?\s*(?P<unit>[a-z]*))$")
+
+
+def canonical_timeframe(value: str) -> str | None:
+    """Map a stored timeframe label ('1', '5min', '15 minute', 'D', '1day', ...) to 1m/5m/15m/1d."""
+    m = _TF_RX.match(str(value).strip().lower())
+    if not m:
+        return None
+    if m.group("pre"):
+        n, unit = int(m.group("pre")), "m"
+    else:
+        n = int(m.group("n")) if m.group("n") else 1
+        unit = m.group("unit") or "m"
+    if unit in ("m", "min", "mins", "minute", "minutes", "t"):
+        return {1: "1m", 5: "5m", 15: "15m", 1440: "1d"}.get(n)
+    if unit in ("d", "day", "days", "daily", "eod") and n == 1:
+        return "1d"
+    return None
+
+
+def _distinct(engine: sa.Engine, table: str, column: str, schema: str | None, limit: int = 25) -> list[str]:
+    tbl = sa.table(table, sa.column(column), schema=schema)
+    stmt = sa.select(tbl.c[column]).distinct().order_by(tbl.c[column]).limit(limit)
+    with engine.connect() as conn:
+        return [str(v) for (v,) in conn.execute(stmt).all() if v is not None]
 
 
 def _pick(cols: dict[str, str], hints: tuple[str, ...]) -> str | None:
@@ -77,6 +107,10 @@ def inspect_database(engine: sa.Engine, schema: str | None = None, probe: bool =
                         sa.select(sa.func.min(tbl.c[info.ts_column]), sa.func.max(tbl.c[info.ts_column]), sa.func.count())
                     ).one()
                 info.rows, info.first, info.last = int(n), str(lo), str(hi)
+            if probe and info.timeframe_column:
+                info.timeframe_values = _distinct(engine, name, info.timeframe_column, schema)
+            if probe and info.symbol_column:
+                info.symbol_values = _distinct(engine, name, info.symbol_column, schema)
             if info.ts_type and "WITH TIME ZONE" in info.ts_type.upper():
                 info.notes.append("timestamptz column: values are converted to display_tz automatically")
             elif info.ts_type and "TIMESTAMP" in info.ts_type.upper():
@@ -85,37 +119,58 @@ def inspect_database(engine: sa.Engine, schema: str | None = None, probe: bool =
     return out
 
 
+def _pick_symbol(values: list[str]) -> str:
+    """Best guess among stored symbols: one that *is* the Nifty 50 index (NIFTY, NIFTY50, NIFTY 50,
+    NIFTY_50, ...), never one that merely contains "nifty" (BANKNIFTY, FINNIFTY, NIFTYNEXT50). Else the first."""
+    plain = lambda v: re.sub(r"[\s_\-.]+", "", v).lower()
+    return next((v for v in values if plain(v) in ("nifty", "nifty50")), values[0])
+
+
 def suggest_config(tables: list[TableInfo], schema: str | None = None) -> str:
     ohlc = [t for t in tables if t.ohlc]
     if not ohlc:
         return "# No table with open/high/low/close columns was found."
-    lines = ['source = "postgres"', 'symbol = "NIFTY50"']
+
+    per_tf = {t.timeframe_guess: t for t in ohlc if t.timeframe_guess}
+    tf_col_tables = [t for t in ohlc if t.timeframe_column]
+    use_single = not (len(per_tf) >= 2 or not tf_col_tables)
+    ref = tf_col_tables[0] if use_single else next(iter(per_tf.values()), ohlc[0])
+
+    symbol_label, symbol_note = "NIFTY50", []
+    if ref.symbol_values:
+        symbol_label = _pick_symbol(ref.symbol_values)
+        if len(ref.symbol_values) > 1:
+            symbol_note = [f"# the table holds several symbols: {', '.join(ref.symbol_values)}  <- check this is the one you want"]
+
+    lines = ['source = "postgres"', f'symbol = "{symbol_label}"', *symbol_note]
     if schema:
         lines += ["", "[database]", f'schema = "{schema}"']
     lines += ["# put the connection string in the PATTERNIQ_DB_URL environment variable, not here", ""]
 
-    per_tf = {t.timeframe_guess: t for t in ohlc if t.timeframe_guess}
-    tf_col_tables = [t for t in ohlc if t.timeframe_column]
-    if len(per_tf) >= 2 or not tf_col_tables:
+    if use_single:
+        lines.append(f'single_table = "{ref.name}"')
+        stored = {canonical_timeframe(v): v for v in ref.timeframe_values if canonical_timeframe(v)}
+        lines += ["", "[timeframe_values]   # how each timeframe is stored in the timeframe column"]
+        for tf in ("1m", "5m", "15m", "1d"):
+            if tf in stored:
+                lines.append(f'{tf} = "{stored[tf]}"')
+            else:
+                lines.append(f'# {tf} = "<stored value>"   # not found among the stored values')
+        unmapped = [v for v in ref.timeframe_values if not canonical_timeframe(v)]
+        if unmapped:
+            lines.append(f"# other stored timeframe values (not used): {', '.join(unmapped)}")
+    else:
         lines.append("[tables]")
         for tf in ("1m", "5m", "15m", "1d"):
-            if tf in per_tf:
-                lines.append(f'{tf} = "{per_tf[tf].name}"')
-            else:
-                lines.append(f'# {tf} = "<table name>"   # could not be guessed')
-        ref = next(iter(per_tf.values()), ohlc[0])
-    else:
-        ref = tf_col_tables[0]
-        lines += [f'single_table = "{ref.name}"', "", "# [timeframe_values]   # only if stored values differ from 1m/5m/15m/1d",
-                  '# 1m = "1"', '# 1d = "D"']
+            lines.append(f'{tf} = "{per_tf[tf].name}"' if tf in per_tf else f'# {tf} = "<table name>"   # could not be guessed')
+
     lines += ["", "[columns]", f'ts = "{ref.ts_column or "timestamp"}"']
     for k in ("open", "high", "low", "close"):
-        real = next((c for c in ref.columns if c.lower() == k), k)
-        lines.append(f'{k} = "{real}"')
+        lines.append(f'{k} = "{next((c for c in ref.columns if c.lower() == k), k)}"')
     if ref.volume_column:
         lines.append(f'volume = "{ref.volume_column}"')
-    if ref.timeframe_column and ref in tf_col_tables and not per_tf:
+    if use_single and ref.timeframe_column:
         lines.append(f'timeframe = "{ref.timeframe_column}"')
     if ref.symbol_column:
-        lines.append(f'# symbol = "{ref.symbol_column}"   # uncomment if the table holds several instruments')
+        lines.append(f'symbol = "{ref.symbol_column}"   # filters rows to the symbol above')
     return "\n".join(lines)

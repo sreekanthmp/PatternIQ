@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..analysis import ALL_CATEGORIES, analyze
 from ..config import Settings
-from ..data import DataSource, make_source
+from ..data import DataLayoutError, DataSource, make_source
 from ..patterns.catalog import CATALOG
 from ..serialize import _clean, analysis_payload
 from ..stats import DEFAULT_HORIZONS, scorecard
@@ -74,6 +74,8 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
             return fn()
         except KeyError as e:
             raise HTTPException(404, str(e).strip("'\"")) from None
+        except DataLayoutError as e:
+            raise HTTPException(500, str(e)) from None
         except SQLAlchemyError as e:  # never echo the DB URL / credentials
             raise HTTPException(502, f"database error: {type(e).__name__}") from None
 

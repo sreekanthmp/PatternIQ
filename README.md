@@ -43,7 +43,7 @@ PatternIQ doesn't assume your schema, so it can map to it. It only ever **reads*
    patterniq serve
    ```
 
-Supported layouts: one table per timeframe, or one table with a timeframe column (optionally also a symbol column). Timestamps can be `timestamp`, `timestamptz`, `date` or epoch seconds/milliseconds; the column type is detected automatically. **Naive timestamps are assumed to be Asia/Kolkata**; if you store UTC, set `stored_tz = "UTC"`. If you only have 1-minute data, 5m/15m/1d are derived from it automatically for CSV sources.
+Supported layouts: one table per timeframe, or one table with a timeframe column (optionally also a symbol column). `inspect-db` prints the values actually stored in the `timeframe` and `symbol` columns and maps them for you (e.g. `15m = "15"`, `1d = "D"`). **If one table holds several instruments, map the `symbol` column**: without it PatternIQ refuses to load rather than silently showing a mix of markets. Timestamps can be `timestamp`, `timestamptz`, `date` or epoch seconds/milliseconds; the column type is detected automatically. **Naive timestamps are assumed to be Asia/Kolkata**; if you store UTC, set `stored_tz = "UTC"`. If you only have 1-minute data, 5m/15m/1d are derived from it automatically for CSV sources.
 
 To analyse a TradingView or broker CSV export without any database:
 

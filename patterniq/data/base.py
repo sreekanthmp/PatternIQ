@@ -16,6 +16,10 @@ import pandas as pd
 OHLCV = ["open", "high", "low", "close", "volume"]
 
 
+class DataLayoutError(ValueError):
+    """The data does not look the way the configuration says it does (e.g. mixed instruments)."""
+
+
 @dataclass
 class Bounds:
     first: pd.Timestamp

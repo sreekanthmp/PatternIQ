@@ -81,3 +81,19 @@ def test_database_errors_do_not_leak_credentials():
     app = create_app(Settings(source="postgres", db_url="postgresql://user:SECRETPW@127.0.0.1:1/nope", tables={"15m": "x"}))
     r = TestClient(app).get("/api/meta")
     assert r.status_code == 502 and "SECRETPW" not in r.text
+
+
+def test_mixed_instruments_surface_a_readable_error_not_wrong_data(tmp_path):
+    import pandas as pd
+    import sqlalchemy as sa
+    from patterniq.config import ColumnMap
+    from patterniq.data import DemoSource
+    from patterniq.data.sql import SqlSource
+
+    ref = DemoSource(Settings(source="demo", demo_days=20)).frame("15m")
+    eng = sa.create_engine(f"sqlite:///{tmp_path/'m.db'}")
+    d = ref.reset_index().rename(columns={"time": "datetime"})
+    pd.concat([d.assign(symbol="A", timeframe="15m"), d.assign(symbol="B", timeframe="15m")]).to_sql("ohlcv", eng, index=False)
+    s = Settings(source="postgres", db_url="sqlite://", single_table="ohlcv", columns=ColumnMap(ts="datetime", timeframe="timeframe"))
+    r = TestClient(create_app(s, source=SqlSource(s, engine=eng))).get("/api/analysis", params={"timeframe": "15m"})
+    assert r.status_code == 500 and "symbol" in r.json()["detail"] and "several instruments" in r.json()["detail"]

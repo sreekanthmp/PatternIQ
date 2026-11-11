@@ -113,6 +113,10 @@ def cmd_inspect(args, settings: Settings) -> int:
         print(f"  {flag}{t.name}{extra}")
         if args.columns or t.ohlc:
             print("        " + ", ".join(f"{c}:{ty}" for c, ty in t.columns.items()))
+        if t.timeframe_values:
+            print(f"        {t.timeframe_column} values: {', '.join(t.timeframe_values)}")
+        if t.symbol_values:
+            print(f"        {t.symbol_column} values: {', '.join(t.symbol_values)}")
         for note in t.notes:
             print(f"        note: {note}")
     print("\n# ---- suggested patterniq.toml ----")

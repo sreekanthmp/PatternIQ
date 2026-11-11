@@ -217,3 +217,86 @@ def test_postgres_naive_and_timestamptz_columns():
     finally:
         with eng.begin() as c:
             c.execute(sa.text("drop table if exists piq_t_naive, piq_t_tz"))
+
+
+# ------------------------------------------------------------------ single-table layout with symbol + timeframe columns
+from patterniq.data import DataLayoutError  # noqa: E402
+from patterniq.data.introspect import canonical_timeframe  # noqa: E402
+
+
+@pytest.mark.parametrize("stored,expected", [
+    ("1m", "1m"), ("1", "1m"), ("1min", "1m"), ("M1", "1m"), ("5", "5m"), ("5min", "5m"), ("m5", "5m"),
+    ("15", "15m"), ("15 minute", "15m"), ("15minutes", "15m"), ("M15", "15m"),
+    ("1d", "1d"), ("D", "1d"), ("1D", "1d"), ("day", "1d"), ("daily", "1d"), ("1day", "1d"), ("EOD", "1d"), ("1440", "1d"),
+    ("60", None), ("1h", None), ("3m", None), ("W", None), ("weekly", None), ("", "1m"),
+])
+def test_canonical_timeframe(stored, expected):
+    assert canonical_timeframe(stored) == expected
+
+
+def _ohlcv_engine(tmp_path, symbols=("NIFTY50",), tf_codes=None, db="ohlcv.db"):
+    tf_codes = tf_codes or {"15m": "15", "1d": "D"}
+    eng = sa.create_engine(f"sqlite:///{tmp_path/db}")
+    frames = []
+    for sym in symbols:
+        for tf, code in tf_codes.items():
+            d = REF[tf].reset_index().rename(columns={"time": "datetime"})
+            d["symbol"], d["timeframe"] = sym, code
+            if sym != "NIFTY50":
+                d[["open", "high", "low", "close"]] *= 2.2
+            frames.append(d)
+    pd.concat(frames).to_sql("ohlcv", eng, index=False)
+    return eng
+
+
+def test_suggested_config_for_single_table_is_valid_and_works_unedited(tmp_path):
+    eng = _ohlcv_engine(tmp_path, symbols=("NIFTY50", "BANKNIFTY"))
+    cfg_text = suggest_config(inspect_database(eng))
+    assert 'single_table = "ohlcv"' in cfg_text
+    assert '15m = "15"' in cfg_text and '1d = "D"' in cfg_text         # stored labels were mapped
+    assert '# 1m = "<stored value>"' in cfg_text                        # missing timeframes are called out
+    assert 'timeframe = "timeframe"' in cfg_text and '\nsymbol = "symbol"' in cfg_text   # symbol filter is NOT left commented out
+    assert 'symbol = "NIFTY50"' in cfg_text and "BANKNIFTY" in cfg_text and "several symbols" in cfg_text
+    f = tmp_path / "patterniq.toml"
+    f.write_text(cfg_text)
+    s = Settings.load(f)
+    src = SqlSource(Settings(**{**s.__dict__, "db_url": "sqlite://"}), engine=eng)
+    assert src.timeframes() == ["15m", "1d"]
+    got = src.load("15m", limit=5)
+    assert (got.index == REF["15m"].index[-5:]).all()
+    assert abs(got.close.iloc[-1] - REF["15m"].close.iloc[-1]) < 1e-9     # NIFTY50 rows, not BANKNIFTY's x2.2
+
+
+def test_inspect_database_reports_stored_timeframe_and_symbol_values(tmp_path):
+    t = next(x for x in inspect_database(_ohlcv_engine(tmp_path, symbols=("NIFTY50", "BANKNIFTY"))) if x.name == "ohlcv")
+    assert t.timeframe_values == ["15", "D"] and t.symbol_values == ["BANKNIFTY", "NIFTY50"]
+
+
+def test_mixed_symbols_without_symbol_mapping_raise_instead_of_silently_picking_rows(tmp_path):
+    eng = _ohlcv_engine(tmp_path, symbols=("NIFTY50", "BANKNIFTY"))
+    base = dict(source="postgres", db_url="sqlite://", single_table="ohlcv", timeframe_values={"15m": "15", "1d": "D"})
+    unfiltered = SqlSource(Settings(**base, columns=ColumnMap(ts="datetime", timeframe="timeframe")), engine=eng)
+    with pytest.raises(DataLayoutError, match="several instruments"):
+        unfiltered.load("15m", limit=500)
+    filtered = SqlSource(Settings(**base, symbol="BANKNIFTY", columns=ColumnMap(ts="datetime", timeframe="timeframe", symbol="symbol")), engine=eng)
+    assert filtered.load("15m", limit=3).close.iloc[-1] == pytest.approx(REF["15m"].close.iloc[-1] * 2.2)
+
+
+def test_a_few_repeated_bars_are_tolerated(tmp_path):
+    eng = _ohlcv_engine(tmp_path)
+    with eng.begin() as c:                                   # re-ingested candle: same timestamp twice
+        c.execute(sa.text("insert into ohlcv select * from ohlcv where timeframe='15' limit 2"))
+    s = Settings(source="postgres", db_url="sqlite://", single_table="ohlcv", timeframe_values={"15m": "15"},
+                 columns=ColumnMap(ts="datetime", timeframe="timeframe", symbol="symbol"))
+    got = SqlSource(s, engine=eng).load("15m", limit=None)
+    assert got.index.is_unique and len(got) == len(REF["15m"])
+
+
+@pytest.mark.parametrize("values,expected", [
+    (["BANKNIFTY", "NIFTY50"], "NIFTY50"), (["FINNIFTY", "NIFTY 50", "NIFTYNEXT50"], "NIFTY 50"),
+    (["BANKNIFTY", "NIFTY"], "NIFTY"), (["Nifty_50"], "Nifty_50"), (["RELIANCE", "TCS"], "RELIANCE"),
+    (["BANKNIFTY", "FINNIFTY"], "BANKNIFTY"),
+])
+def test_symbol_guess_never_prefers_a_lookalike_index(values, expected):
+    from patterniq.data.introspect import _pick_symbol
+    assert _pick_symbol(values) == expected

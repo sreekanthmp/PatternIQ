@@ -13,7 +13,12 @@ import pandas as pd
 import sqlalchemy as sa
 
 from ..config import TIMEFRAMES, Settings
-from .base import Bounds, clean_ohlc, local_to_stored, to_local_naive
+from .base import Bounds, DataLayoutError, clean_ohlc, local_to_stored, to_local_naive
+
+
+# A few repeated bars (a re-ingested candle) are tolerated and the last one wins; a large share means
+# the table mixes series and silently picking one row per timestamp would show the wrong market.
+MAX_SHARED_TIMESTAMPS = 0.02
 
 
 def normalize_db_url(url: str) -> str:
@@ -146,4 +151,12 @@ class SqlSource:
                                            index=pd.DatetimeIndex([], name="time")))
         df = pd.DataFrame(rows, columns=[k for k in ("time", "open", "high", "low", "close", "volume") if k != "volume" or c.volume])
         df.index = to_local_naive(df.pop("time"), self.s.stored_tz, self.s.display_tz)
+        shared = df.index.duplicated(keep=False)
+        if shared.mean() > MAX_SHARED_TIMESTAMPS:
+            raise DataLayoutError(
+                f"{int(shared.sum())} of {len(df)} rows from {self._table(timeframe).name!r} share a timestamp with "
+                f"another row (e.g. {df.index[shared][0]}). The table probably holds several instruments or series. "
+                "Set `symbol` under [columns] (and the wanted symbol at the top of patterniq.toml); "
+                "`patterniq inspect-db` lists the values that are stored."
+            )
         return clean_ohlc(df)

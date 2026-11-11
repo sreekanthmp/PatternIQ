@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..config import Settings
-from .base import Bounds, DataSource, clean_ohlc
+from .base import Bounds, DataLayoutError, DataSource, clean_ohlc
 from .frames import CsvSource, DemoSource, read_ohlcv_csv
 
 
@@ -17,4 +17,4 @@ def make_source(settings: Settings) -> DataSource:
     raise ValueError(f"unknown source {settings.source!r} (expected postgres, csv or demo)")
 
 
-__all__ = ["Bounds", "CsvSource", "DataSource", "DemoSource", "clean_ohlc", "make_source", "read_ohlcv_csv"]
+__all__ = ["Bounds", "CsvSource", "DataLayoutError", "DataSource", "DemoSource", "clean_ohlc", "make_source", "read_ohlcv_csv"]
