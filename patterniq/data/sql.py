@@ -32,12 +32,12 @@ def normalize_db_url(url: str) -> str:
 class SqlSource:
     kind = "postgres"
 
-    def __init__(self, settings: Settings, engine: sa.Engine | None = None):
+    def __init__(self, settings: Settings, engine: sa.Engine | None = None, read_only: bool = True):
         if not settings.db_url and engine is None:
             raise ValueError("no database URL: set PATTERNIQ_DB_URL or [database] url in patterniq.toml")
         self.s = settings
         self.engine = engine or sa.create_engine(normalize_db_url(settings.db_url), pool_pre_ping=True)
-        if self.engine.dialect.name == "postgresql":
+        if read_only and self.engine.dialect.name == "postgresql":
             self.engine = self.engine.execution_options(postgresql_readonly=True)
         self.auto_note: str | None = None
         if not settings.has_layout():  # no config needed: read the layout from the database itself

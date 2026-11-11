@@ -145,6 +145,12 @@ export default function ChartPane(props: Props) {
     chart.subscribeClick((param) => {
       if (param.time) cb.current.onPickTime(param.time as number);
     });
+    chart.timeScale().subscribeVisibleTimeRangeChange((r) => {
+      if (r) {
+        el.dataset.visibleFrom = String(r.from);
+        el.dataset.visibleTo = String(r.to);
+      }
+    });
 
     return () => {
       chart.remove();
@@ -172,15 +178,28 @@ export default function ChartPane(props: Props) {
   }, [props.theme, props.intraday]);
 
   // ---- candles ----
+  const prevCandlesRef = useRef<Candle[]>([]);
   useEffect(() => {
     const chart = chartRef.current;
     const candle = candleRef.current;
     if (!chart || !candle) return;
+    const prev = prevCandlesRef.current;
+    const range = chart.timeScale().getVisibleLogicalRange();
     candle.setData(props.candles.map((c) => ({ ...c, time: asTime(c.time) })));
-    if (lastKeyRef.current !== props.datasetKey && props.candles.length) {
+    prevCandlesRef.current = props.candles;
+    const n = props.candles.length;
+    if (lastKeyRef.current !== props.datasetKey && n) {
       lastKeyRef.current = props.datasetKey;
-      const n = props.candles.length;
       chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 170), to: n + 6 });
+    } else if (prev.length && range && n) {
+      // Same dataset, new bars (live update): keep what the user is looking at. The window slides, so bar
+      // indexes shift; if they were following the latest bar keep following it, otherwise keep the same dates.
+      const dropped = prev.findIndex((c) => c.time >= props.candles[0].time);
+      const k = dropped < 0 ? prev.length : dropped;
+      const width = range.to - range.from;
+      const following = range.to >= prev.length - 1;
+      const to = following ? n + (range.to - prev.length) : range.to - k;
+      chart.timeScale().setVisibleLogicalRange({ from: to - width, to });
     }
   }, [props.candles, props.datasetKey]);
 

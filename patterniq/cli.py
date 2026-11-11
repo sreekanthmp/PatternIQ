@@ -12,6 +12,7 @@ from .analysis import ALL_CATEGORIES, analyze
 import tomllib
 
 from .config import TIMEFRAMES, ConfigError, Settings
+from .live.env import LiveConfigError
 from .data import make_source, read_ohlcv_csv
 from .patterns.catalog import CATALOG
 from .stats import scorecard
@@ -136,6 +137,87 @@ def cmd_check(args, settings: Settings) -> int:
     return 0 if ok else 1
 
 
+def _live_setup(args, settings: Settings):
+    """Shared by live-check / live: credentials, token, sink. Returns (creds, exchange, token, sink)."""
+    from .live.angel import resolve_token
+    from .live.env import AngelCredentials
+    from .live.sink import SqlSink
+
+    creds = AngelCredentials.from_env()
+    symbol = args.symbol or settings.symbol
+    exchange, token = resolve_token(symbol, args.exchange, args.token)
+    sink = SqlSink(settings)
+    return creds, exchange, token, sink
+
+
+def cmd_live_check(args, settings: Settings) -> int:
+    """Read-only rehearsal: log in, show a few real candles, show what a sync would write. Writes nothing."""
+    from .live.angel import AngelFeed, FeedError
+    from .live.clock import ist_now
+    from .live.env import LiveConfigError
+    from .live.ingest import Ingestor
+
+    creds, exchange, token, sink = _live_setup(args, settings)
+    feed = AngelFeed(creds)
+    print(f"database: {sink.auto_note or 'using configured layout'}")
+    print(f"symbol {sink.s.symbol!r} -> Angel {exchange}:{token}")
+    for tf in ("1m", "5m", "15m", "1d"):
+        last = sink.last_bar(tf)
+        print(f"  stored {tf:>3}: latest bar {last if last is not None else 'none'}")
+    ok = sink.can_insert()
+    print("write permission:", {True: "yes", False: "NO - the database user cannot INSERT", None: "unknown"}[ok])
+    try:
+        print("logging in to Angel One ...")
+        feed.login()
+        print("login: OK")
+        now = ist_now()
+        df = feed.candles(exchange, token, "1m", now - pd.Timedelta(minutes=args.minutes), now)
+        if df.empty:
+            print("no candles returned (market closed, holiday, or wrong token). Try during market hours.")
+        else:
+            print(f"last {len(df)} one-minute candles from Angel:")
+            print(df.tail(8).round(2).to_string())
+            if df["close"].median() < 1000:
+                print("WARNING: these prices look too low for Nifty 50; check --token / --exchange.")
+        ing = Ingestor(feed, sink, exchange=exchange, token=token, dry_run=True, log=lambda m: None)
+        res = ing.sync_once()
+        print("a sync right now would insert:", {k: v for k, v in res.inserted.items()} or "nothing")
+        print("\nNothing was written. Next: `patterniq live --dry-run`, then `patterniq live`.")
+        return 0
+    except (FeedError, LiveConfigError) as e:
+        print(f"FAILED: {e}", file=sys.stderr)
+        return 1
+    finally:
+        feed.close()
+
+
+def cmd_live(args, settings: Settings) -> int:
+    from .live.angel import AngelFeed, FeedError
+    from .live.env import LiveConfigError
+    from .live.ingest import Ingestor
+
+    creds, exchange, token, sink = _live_setup(args, settings)
+    feed = AngelFeed(creds)
+    print(f"database: {sink.auto_note or 'using configured layout'}")
+    if sink.can_insert() is False and not args.dry_run:
+        print("error: the database user has no INSERT permission on the candle table.", file=sys.stderr)
+        return 1
+    ing = Ingestor(feed, sink, exchange=exchange, token=token, timeframes=tuple(args.timeframes),
+                   dry_run=args.dry_run, max_backfill_days=args.max_backfill_days)
+    try:
+        feed.login()
+        print(f"logged in; feeding {sink.s.symbol!r} ({exchange}:{token}) into {', '.join(args.timeframes)}. Ctrl+C to stop.")
+        ing.run_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    except (FeedError, LiveConfigError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    finally:
+        feed.close()
+    return 0
+
+
 def cmd_serve(args, settings: Settings) -> int:
     import uvicorn
 
@@ -184,6 +266,23 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("check", help="diagnose the configuration: what is found, and why not")
     sp.set_defaults(fn=cmd_check)
 
+    def live_args(sp):
+        sp.add_argument("--symbol", help="symbol label (default: the one in use for the database)")
+        sp.add_argument("--exchange", help="Angel exchange (default NSE)")
+        sp.add_argument("--token", help="Angel symbol token (built in for NIFTY / BANKNIFTY)")
+
+    sp = sub.add_parser("live-check", help="read-only rehearsal of live data: login, sample candles, what would be written")
+    live_args(sp)
+    sp.add_argument("--minutes", type=int, default=15, help="how many recent minutes of candles to show")
+    sp.set_defaults(fn=cmd_live_check)
+
+    sp = sub.add_parser("live", help="keep the candle table up to date from Angel One (run during market hours)")
+    live_args(sp)
+    sp.add_argument("--dry-run", action="store_true", help="do everything except write to the database")
+    sp.add_argument("--timeframes", nargs="+", default=["1m", "5m", "15m", "1d"], choices=list(TIMEFRAMES))
+    sp.add_argument("--max-backfill-days", type=int, default=45, help="never backfill further back than this")
+    sp.set_defaults(fn=cmd_live)
+
     sp = sub.add_parser("serve", help="run the API + web UI")
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8000)
@@ -197,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: patterniq.toml is not valid TOML ({e}). It must contain only the config text "
               "(the suggested block from `inspect-db`), not the table listing above it.", file=sys.stderr)
         return 2
-    except ConfigError as e:
+    except (ConfigError, LiveConfigError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     except SQLAlchemyError as e:

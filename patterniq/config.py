@@ -27,6 +27,20 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+def _url_from_pg_env() -> str | None:
+    """Build a connection URL from PG_USER / PG_PASSWORD (+ PG_HOST, PG_PORT, PG_DATABASE) if present."""
+    user, password = os.environ.get("PG_USER"), os.environ.get("PG_PASSWORD")
+    if not (user and password):
+        return None
+    from sqlalchemy.engine import URL
+
+    return URL.create(
+        "postgresql+psycopg2", username=user, password=password,
+        host=os.environ.get("PG_HOST") or "localhost", port=int(os.environ.get("PG_PORT") or 5432),
+        database=os.environ.get("PG_DATABASE") or "prism",
+    ).render_as_string(hide_password=False)
+
+
 class ConfigError(ValueError):
     """The configuration is missing or unusable; the message says what to do about it."""
 
@@ -95,6 +109,9 @@ class Settings:
 
     @classmethod
     def load(cls, path: str | os.PathLike | None = None) -> "Settings":
+        from .live.env import load_dotenv
+
+        load_dotenv()  # a git-ignored .env next to where patterniq runs; real environment variables win
         data: dict = {}
         cfg_path = Path(path or os.environ.get("PATTERNIQ_CONFIG", "patterniq.toml"))
         found = cfg_path.is_file()
@@ -104,7 +121,7 @@ class Settings:
         s = cls.from_dict(data)
         s.config_path, s.config_found = str(cfg_path.resolve()), found
         env = os.environ.get
-        s.db_url = env("PATTERNIQ_DB_URL") or s.db_url
+        s.db_url = env("PATTERNIQ_DB_URL") or s.db_url or _url_from_pg_env()
         s.source = env("PATTERNIQ_SOURCE") or s.source
         s.symbol = env("PATTERNIQ_SYMBOL") or s.symbol
         s.csv_dir = env("PATTERNIQ_CSV_DIR") or s.csv_dir

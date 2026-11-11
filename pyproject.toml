@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# smartapi-python imports logzero and websocket-client without declaring them, so they are listed here.
+live = ["smartapi-python>=1.5", "logzero>=1.7", "websocket-client>=1.6"]
 
 [project.scripts]
 patterniq = "patterniq.cli:main"

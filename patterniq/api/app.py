@@ -18,7 +18,8 @@ from ..analysis import ALL_CATEGORIES, analyze
 from ..config import Settings
 from ..data import DataLayoutError, DataSource, make_source
 from ..patterns.catalog import CATALOG
-from ..serialize import _clean, analysis_payload
+from ..live.clock import ist_now, market_open
+from ..serialize import _clean, analysis_payload, epoch_seconds
 from ..stats import DEFAULT_HORIZONS, scorecard
 
 WARMUP_BARS = 400  # extra history so ATR / pivots / levels are settled at the left edge
@@ -170,6 +171,9 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
             "has_later": bool(b and b.last > df.index[-1]),
             "data_first": str(b.first) if b else None,
             "data_last": str(b.last) if b else None,
+            # the server's clock (exchange-local wall time, same convention as chart times) for the feed-health badge
+            "now": int(epoch_seconds(pd.DatetimeIndex([ist_now()]))[0]),
+            "market_open": bool(market_open(ist_now())),
         }
         return payload
 

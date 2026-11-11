@@ -97,3 +97,13 @@ def test_mixed_instruments_surface_a_readable_error_not_wrong_data(tmp_path):
     s = Settings(source="postgres", db_url="sqlite://", single_table="ohlcv", columns=ColumnMap(ts="datetime", timeframe="timeframe"))
     r = TestClient(create_app(s, source=SqlSource(s, engine=eng))).get("/api/analysis", params={"timeframe": "15m"})
     assert r.status_code == 500 and "symbol" in r.json()["detail"] and "several instruments" in r.json()["detail"]
+
+
+def test_detection_ids_are_stable_across_windows_and_meta_carries_the_clock(client):
+    a = client.get("/api/analysis", params={"timeframe": "15m", "bars": 400, "min_quality": 0.4}).json()
+    b = client.get("/api/analysis", params={"timeframe": "15m", "bars": 300, "min_quality": 0.4}).json()      # window starts later
+    ids_a = {d["id"] for d in a["detections"] if d["time"] >= b["candles"][0]["time"]}
+    ids_b = {d["id"] for d in b["detections"]}
+    assert len(ids_b) > 10 and len(ids_a & ids_b) / len(ids_b) > 0.9
+    assert all(d["id"].count(":") == 2 for d in a["detections"])
+    assert isinstance(a["meta"]["now"], int) and isinstance(a["meta"]["market_open"], bool)

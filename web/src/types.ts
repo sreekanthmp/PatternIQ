@@ -77,6 +77,8 @@ export interface AnalysisMeta {
   has_later: boolean;
   data_first: string | null;
   data_last: string | null;
+  now: number;
+  market_open: boolean;
 }
 
 export interface Analysis {

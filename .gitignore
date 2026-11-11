@@ -9,3 +9,4 @@ node_modules/
 web/dist/
 *.csv
 !tests/fixtures/*.csv
+logs/

@@ -53,6 +53,54 @@ To analyse a TradingView or broker CSV export without any database:
 patterniq detect --file nifty_15m.csv --tf 15m --min-quality 0.6
 ```
 
+## Live data from Angel One (SmartAPI)
+
+The dashboard only *reads* the database. A separate process, `patterniq live`, logs in to Angel One, pulls candles and **appends each bar to your candle table once the bar has closed**. Run both side by side.
+
+**Set up (once)**
+
+```bash
+pip install -e ".[live]"        # the Angel SDK, plus two packages it imports but forgets to declare
+```
+
+Copy [`.env.example`](.env.example) to `.env` in the folder you run `patterniq` from (it is git-ignored) and fill it in:
+
+```
+ANGEL_API_KEY=...
+ANGEL_CLIENT_ID=...
+ANGEL_PASSWORD=...        # your Angel login PIN
+ANGEL_TOTP=...            # the TOTP *secret* (the long key from enrolment), not the 6-digit code
+PG_USER=...  PG_PASSWORD=...  PG_HOST=localhost  PG_PORT=5432  PG_DATABASE=prism     # or PATTERNIQ_DB_URL
+```
+
+Real environment variables win over `.env`. Depending on how the API key was created, Angel may need its historical-data access enabled for that key; if `live-check` reports a permission error, check the app's settings in the SmartAPI portal.
+
+**First run: a rehearsal that writes nothing**
+
+```bash
+patterniq live-check
+```
+
+It logs in, prints the latest real 1-minute candles (so you can see the symbol token is right and prices look like Nifty), shows the newest stored bar per timeframe, confirms the database user may `INSERT`, and prints what a sync would add.
+
+**Then**
+
+```bash
+patterniq live --dry-run      # the real loop, but nothing is written; watch the log lines
+patterniq live                # keep this running during market hours (09:15-15:30 IST)
+patterniq serve               # in another terminal, then switch on Live (and Alerts) in the dashboard
+```
+
+**What it writes.** `1m` bars come from Angel; `5m` and `15m` bars are built from those closed 1m bars (anchored at 09:15, emitted only when complete); the `1d` bar is Angel's daily candle, fetched after 15:30. On start it fills any gap since the newest stored bar (at most `--max-backfill-days`, default 45). Rows are **insert-only and idempotent**: existing bars are never updated or deleted, and running two copies at once is not supported. Built-in Angel tokens exist for `NIFTY` and `BANKNIFTY`; for anything else pass `--token` (and `--exchange`).
+
+**Dashboard.** *Live* re-reads the latest bars every 15 s without moving your zoom (if you were at the right edge it follows the newest bar; if you had scrolled back it stays put). *Alerts* shows a toast, beeps, and raises a desktop notification when a **confirmed** pattern appears that was not there on the previous refresh, using your current category / quality / pattern filters. The status dot shows whether new candles are really arriving, so a stopped `patterniq live` is visible. Alerts cover the timeframe on screen and only work while the tab is open.
+
+**Security.**
+* It is read-only towards the broker: login and historical candles only. There is no order code in this repository.
+* Keep `.env` out of git and out of chats. **Rotate** any credential that has been pasted anywhere (change the PIN, re-enrol the TOTP, regenerate the API key in the SmartAPI portal).
+* The Angel SDK writes the full request (including the PIN, API key and the one-time code) to its error log when a call fails. PatternIQ switches that logger off and redacts its own messages; there is a test that runs the real SDK against a fake network and checks nothing leaks. If you use the SDK in your own scripts, do the same.
+* On import the SDK asks `api.ipify.org` for your public IP (Angel requires it as a request header).
+
 ## Using the dashboard
 
 * **Chart**: candles, one arrow per bar (`+n` when several patterns coincide), chart-pattern geometry (necklines, trendlines, flag poles; dashed while still forming), support/resistance lines (`R×3` = resistance tested 3 times) and previous-day high/low/close.
@@ -183,5 +231,5 @@ The tests include a **causality test** (analysing data cut at bar *t* gives exac
 ## Known limits
 
 * Rules are explicit heuristics tuned on synthetic formations, not learned from your trades; thresholds live in `AnalysisConfig` (`patterniq/analysis.py` and the `*Params` dataclasses). Expect to tune them on real data, and check the first weeks of signals against your own eye.
-* Volume is not used. Overnight gaps are not treated specially on intraday charts. Single instrument per server. No alerts or live streaming yet (use **Latest** to refresh).
+* Volume is not used (and the Nifty index has none). Overnight gaps are not treated specially on intraday charts. Single instrument per server. Live data is polled once a minute after each bar closes, not streamed tick by tick; alerts are for the timeframe on screen only.
 * Patterns that span a session boundary on 1m/5m data are allowed; they can look different from the same pattern within one day.

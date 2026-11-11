@@ -60,7 +60,8 @@ def detection_to_dict(d: Detection, times: np.ndarray, first_visible: int = 0) -
 
     return _clean(
         {
-            "id": f"{d.pattern}:{d.start}:{d.confirmed}",
+            # time based, so the id is the same whichever window of bars the pattern is seen in
+            "id": f"{d.pattern}:{int(times[d.start])}:{int(times[d.confirmed])}",
             "pattern": d.pattern,
             "label": info.label if info else d.pattern,
             "category": d.category,
