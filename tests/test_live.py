@@ -519,3 +519,35 @@ def test_dotenv_next_to_the_working_directory_is_picked_up(tmp_path, monkeypatch
     assert (parsed.username, parsed.database) == ("bob", "mydb")
     for k in ("PG_USER", "PG_PASSWORD", "PG_DATABASE"):
         monkeypatch.delenv(k, raising=False)
+
+
+def test_last_session_close_skips_weekends_and_pre_open():
+    lsc = clock.last_session_close
+    assert lsc(T("2024-11-04 16:00")) == T("2024-11-04 15:30")             # Monday evening
+    assert lsc(T("2024-11-04 11:00")) == T("2024-11-01 15:30")             # Monday mid-session: the previous close is the last complete one
+    assert lsc(T("2024-11-04 08:00")) == T("2024-11-01 15:30")             # before the open
+    assert lsc(T("2024-11-03 12:00")) == T("2024-11-01 15:30")             # Sunday
+    assert lsc(T("2024-11-02 23:59")) == T("2024-11-01 15:30")             # Saturday
+
+
+def test_live_check_candles_fall_back_to_the_last_session_when_closed():
+    from patterniq.cli import recent_candles
+
+    class Feed:
+        def __init__(self, empty_days):
+            self.calls, self.empty_days = [], {T(d) for d in empty_days}
+
+        def candles(self, ex, tok, tf, start, end):
+            self.calls.append((start, end))
+            return SERIES.loc[start:end] if end.normalize() not in self.empty_days else parse_candles(None)
+
+    f = Feed([])
+    df, end = recent_candles(f, "NSE", "1", T("2024-11-04 20:00"), 15)       # evening: shows 15:15-15:30 of the same day
+    assert end == T("2024-11-04 15:30") and len(df) == 15 and df.index[-1] == T("2024-11-04 15:29")
+    f = Feed(["2024-11-04"])                                                  # that day was a holiday: steps back to Friday
+    df, end = recent_candles(f, "NSE", "1", T("2024-11-04 20:00"), 15)
+    assert end == T("2024-11-01 15:30") and not df.empty and len(f.calls) == 2
+    df, end = recent_candles(Feed(["2024-11-04", "2024-11-01"]), "NSE", "1", T("2024-11-04 11:00"), 15)
+    assert df.empty                                                           # nothing anywhere: reported, not an endless loop
+    live, end = recent_candles(Feed([]), "NSE", "1", T("2024-11-04 10:30:20"), 15)
+    assert end == T("2024-11-04 10:30:20")                                    # market open: the live window

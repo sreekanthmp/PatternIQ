@@ -150,6 +150,21 @@ def _live_setup(args, settings: Settings):
     return creds, exchange, token, sink
 
 
+def recent_candles(feed, exchange, token, now, minutes):
+    """The latest ``minutes`` of 1-minute candles: live if the market is open, otherwise the end of the most
+    recent session that has data (stepping back over weekends and holidays). Returns (frame, window end)."""
+    from .live.clock import last_session_close, market_open
+
+    end = now if market_open(now) else last_session_close(now)
+    df = None
+    for _ in range(6):
+        df = feed.candles(exchange, token, "1m", end - pd.Timedelta(minutes=minutes), end)
+        if not df.empty:
+            break
+        end = last_session_close(end.normalize() - pd.Timedelta(seconds=1))
+    return df, end
+
+
 def cmd_live_check(args, settings: Settings) -> int:
     """Read-only rehearsal: log in, show a few real candles, show what a sync would write. Writes nothing."""
     from .live.angel import AngelFeed, FeedError
@@ -171,10 +186,13 @@ def cmd_live_check(args, settings: Settings) -> int:
         feed.login()
         print("login: OK")
         now = ist_now()
-        df = feed.candles(exchange, token, "1m", now - pd.Timedelta(minutes=args.minutes), now)
+        df, end = recent_candles(feed, exchange, token, now, args.minutes)
         if df.empty:
-            print("no candles returned (market closed, holiday, or wrong token). Try during market hours.")
+            print("no candles returned for the last few sessions: check --token / --exchange, or that the API key may "
+                  "read historical data (SmartAPI portal).")
         else:
+            if end != now:
+                print(f"(the market is closed: showing the end of the last session, up to {end:%a %d %b %H:%M})")
             print(f"last {len(df)} one-minute candles from Angel:")
             print(df.tail(8).round(2).to_string())
             if df["close"].median() < 1000:

@@ -52,3 +52,13 @@ def bucket_start(ts: pd.Timestamp, minutes: int) -> pd.Timestamp:
     anchor = session_open(ts)
     n = int((ts - anchor) // pd.Timedelta(minutes=minutes))
     return anchor + n * pd.Timedelta(minutes=minutes)
+
+
+def last_session_close(ts: pd.Timestamp) -> pd.Timestamp:
+    """The most recent weekday 15:30 at or before ``ts`` (exchange holidays are not known here)."""
+    day = ts.normalize()
+    if not (is_weekday(day) and ts >= session_close(day)):
+        day -= pd.Timedelta(days=1)
+    while not is_weekday(day):
+        day -= pd.Timedelta(days=1)
+    return session_close(day)
