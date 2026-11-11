@@ -27,6 +27,10 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+class ConfigError(ValueError):
+    """The configuration is missing or unusable; the message says what to do about it."""
+
+
 TIMEFRAMES = ("1m", "5m", "15m", "1d")
 TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "1d": 1440}
 
@@ -58,17 +62,22 @@ class Settings:
     display_tz: str = "Asia/Kolkata"  # timezone shown on the chart
     csv_dir: str | None = None
     demo_days: int = 500
+    config_path: str | None = None  # where the config file was looked for (set by load())
+    config_found: bool = False
+
+    def where_is_config(self) -> str:
+        """One sentence on which config file is in use, with the usual Windows pitfall called out."""
+        if self.config_found:
+            return f"Config file in use: {self.config_path}."
+        msg = f"No config file was found at {self.config_path or 'patterniq.toml'} (it is read from the folder you run patterniq in)."
+        if self.config_path and Path(self.config_path + ".txt").exists():
+            msg += f" But {Path(self.config_path + '.txt').name} exists: Notepad added '.txt'. Rename it to patterniq.toml."
+        return msg
 
     @classmethod
-    def load(cls, path: str | os.PathLike | None = None) -> "Settings":
-        data: dict = {}
-        cfg_path = Path(path or os.environ.get("PATTERNIQ_CONFIG", "patterniq.toml"))
-        if cfg_path.is_file():
-            with cfg_path.open("rb") as fh:
-                data = tomllib.load(fh)
-
+    def from_dict(cls, data: dict) -> "Settings":
         db = data.get("database", {})
-        s = cls(
+        return cls(
             source=data.get("source", ""),
             symbol=data.get("symbol", "NIFTY50"),
             db_url=db.get("url"),
@@ -83,6 +92,17 @@ class Settings:
             csv_dir=data.get("csv_dir"),
             demo_days=int(data.get("demo_days", 500)),
         )
+
+    @classmethod
+    def load(cls, path: str | os.PathLike | None = None) -> "Settings":
+        data: dict = {}
+        cfg_path = Path(path or os.environ.get("PATTERNIQ_CONFIG", "patterniq.toml"))
+        found = cfg_path.is_file()
+        if found:
+            with cfg_path.open("rb") as fh:
+                data = tomllib.load(fh)
+        s = cls.from_dict(data)
+        s.config_path, s.config_found = str(cfg_path.resolve()), found
         env = os.environ.get
         s.db_url = env("PATTERNIQ_DB_URL") or s.db_url
         s.source = env("PATTERNIQ_SOURCE") or s.source
@@ -91,6 +111,10 @@ class Settings:
         if not s.source:
             s.source = "postgres" if s.db_url else ("csv" if s.csv_dir else "demo")
         return s
+
+    def has_layout(self) -> bool:
+        """True when the config says which table(s) hold the candles."""
+        return any(self.table_for(tf) for tf in TIMEFRAMES)
 
     def table_for(self, tf: str) -> str | None:
         if tf in self.tables:

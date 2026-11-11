@@ -23,27 +23,29 @@ With no database configured PatternIQ shows **synthetic demo data** (random, del
 
 ## Connect your `prism` PostgreSQL database
 
-PatternIQ doesn't assume your schema, so it can map to it. It only ever **reads** (the connection is opened read-only).
+PatternIQ reads the table layout from the database itself, so **no config file is needed** for a typical setup. It only ever **reads** (the connection is opened read-only).
 
-1. Give it the connection string (keep it out of files):
+1. Give it the connection string (keep it out of files). In PowerShell:
 
-   ```bash
-   export PATTERNIQ_DB_URL="postgresql://user:password@localhost:5432/prism"
+   ```powershell
+   $env:PATTERNIQ_DB_URL = "postgresql://user:password@localhost:5432/prism"
    ```
 
-2. Let it look at your database and propose a config:
+   (bash: `export PATTERNIQ_DB_URL="postgresql://user:password@localhost:5432/prism"`)
+
+2. Check what it finds:
 
    ```bash
-   patterniq inspect-db           # lists tables, spots OHLC ones, guesses timeframes, prints a patterniq.toml
+   patterniq check
    ```
 
-3. Save the suggestion as `patterniq.toml` (see [`patterniq.example.toml`](patterniq.example.toml); it is git-ignored), then:
+   It prints the table and columns it detected, the symbol it will use, and the row count per timeframe. If something is off it says why (wrong password, table not found, symbol or timeframe labels that don't match what is stored, a config file in the wrong place).
 
-   ```bash
-   patterniq serve
-   ```
+3. Run it: `patterniq serve`.
 
-Supported layouts: one table per timeframe, or one table with a timeframe column (optionally also a symbol column). `inspect-db` prints the values actually stored in the `timeframe` and `symbol` columns and maps them for you (e.g. `15m = "15"`, `1d = "D"`). **If one table holds several instruments, map the `symbol` column**: without it PatternIQ refuses to load rather than silently showing a mix of markets. Timestamps can be `timestamp`, `timestamptz`, `date` or epoch seconds/milliseconds; the column type is detected automatically. **Naive timestamps are assumed to be Asia/Kolkata**; if you store UTC, set `stored_tz = "UTC"`. If you only have 1-minute data, 5m/15m/1d are derived from it automatically for CSV sources.
+Auto-detection refuses to guess when the answer would be a coin toss (several candidate tables, or several stored symbols with none of them Nifty 50) and tells you what to set. To override anything, copy [`patterniq.example.toml`](patterniq.example.toml) to `patterniq.toml` in the folder you run `patterniq` from (it is git-ignored); `patterniq inspect-db` prints the detected layout and values as a starting point.
+
+Detected layouts: one table per timeframe, or one table with a timeframe column (optionally also a symbol column). `inspect-db` prints the values actually stored in the `timeframe` and `symbol` columns and maps them for you (e.g. `15m = "15"`, `1d = "D"`). **If one table holds several instruments, map the `symbol` column**: without it PatternIQ refuses to load rather than silently showing a mix of markets. Timestamps can be `timestamp`, `timestamptz`, `date` or epoch seconds/milliseconds; the column type is detected automatically. **Naive timestamps are assumed to be Asia/Kolkata**; if you store UTC, set `stored_tz = "UTC"`. If you only have 1-minute data, 5m/15m/1d are derived from it automatically for CSV sources.
 
 To analyse a TradingView or broker CSV export without any database:
 
@@ -137,7 +139,8 @@ patterniq detect --file nifty_15m.csv --tf 15m --min-quality 0.6
 patterniq detect --tf 15m --bars 1500 --min-quality 0.7        # recent detections as a table (or --out file.csv)
 patterniq detect --tf 5m --since 2025-03-01 --category chart   # only chart patterns since a date
 patterniq stats  --tf 15m --bars 30000 --horizons 5 10 20      # scorecard in the terminal
-patterniq inspect-db                                           # propose a config for your database
+patterniq check                                                # what is found in your database, and why not
+patterniq inspect-db                                           # list tables and propose a config for your database
 patterniq serve --host 0.0.0.0 --port 8000                     # API + dashboard
 ```
 

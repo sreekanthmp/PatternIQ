@@ -7,9 +7,12 @@ distinct values of any timeframe / symbol column (so the suggested config can ma
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+import tomllib
+from dataclasses import dataclass, field, replace
 
 import sqlalchemy as sa
+
+from ..config import ConfigError, Settings
 
 _TS_HINTS = ("timestamp", "datetime", "date_time", "time", "date", "ts", "dt")
 _TF_HINTS = ("timeframe", "interval", "tf", "period", "resolution")
@@ -126,15 +129,21 @@ def _pick_symbol(values: list[str]) -> str:
     return next((v for v in values if plain(v) in ("nifty", "nifty50")), values[0])
 
 
+def _layout(ohlc: list[TableInfo]):
+    """(single-table layout?, reference table, {timeframe: table}) for the OHLC tables found."""
+    per_tf = {t.timeframe_guess: t for t in ohlc if t.timeframe_guess}
+    tf_col_tables = [t for t in ohlc if t.timeframe_column]
+    use_single = not (len(per_tf) >= 2 or not tf_col_tables)
+    ref = tf_col_tables[0] if use_single else next(iter(per_tf.values()), ohlc[0])
+    return use_single, ref, per_tf
+
+
 def suggest_config(tables: list[TableInfo], schema: str | None = None) -> str:
     ohlc = [t for t in tables if t.ohlc]
     if not ohlc:
         return "# No table with open/high/low/close columns was found."
 
-    per_tf = {t.timeframe_guess: t for t in ohlc if t.timeframe_guess}
-    tf_col_tables = [t for t in ohlc if t.timeframe_column]
-    use_single = not (len(per_tf) >= 2 or not tf_col_tables)
-    ref = tf_col_tables[0] if use_single else next(iter(per_tf.values()), ohlc[0])
+    use_single, ref, per_tf = _layout(ohlc)
 
     symbol_label, symbol_note = "NIFTY50", []
     if ref.symbol_values:
@@ -174,3 +183,59 @@ def suggest_config(tables: list[TableInfo], schema: str | None = None) -> str:
     if ref.symbol_column:
         lines.append(f'symbol = "{ref.symbol_column}"   # filters rows to the symbol above')
     return "\n".join(lines)
+
+
+def autoconfigure(settings: Settings, engine: sa.Engine) -> tuple[Settings, str]:
+    """Work out the table layout from the database itself, so no config file is needed.
+
+    Applies the same rules as ``inspect-db``'s suggestion. It refuses (with a message saying what
+    to set) instead of guessing when the choice would be a coin toss: several candidate tables, or
+    several stored symbols with none of them the Nifty 50.
+    """
+    tables = inspect_database(engine, settings.db_schema)
+    ohlc = [t for t in tables if t.ohlc]
+    where = settings.where_is_config()
+    if not ohlc:
+        raise ConfigError(
+            "No table with open/high/low/close columns was found in the database"
+            + (f" (schema {settings.db_schema!r})" if settings.db_schema else "")
+            + f". Set the layout in patterniq.toml. {where}"
+        )
+    use_single, ref, per_tf = _layout(ohlc)
+    tf_col_tables = [t for t in ohlc if t.timeframe_column]
+    if (use_single and len(tf_col_tables) > 1) or (not use_single and len(per_tf) < 2 and len(ohlc) > 1):
+        raise ConfigError(
+            "Several tables look like candle data (" + ", ".join(t.name for t in ohlc) + ") and it is not clear which "
+            f"to use. Choose one with `single_table = ...` or `[tables]` in patterniq.toml. {where}"
+        )
+
+    data = tomllib.loads(suggest_config(tables, settings.db_schema))
+    auto = Settings.from_dict(data)
+    symbol = auto.symbol
+    if ref.symbol_values:
+        plain = lambda v: re.sub(r"[\s_\-.]+", "", v).lower()
+        if settings.symbol in ref.symbol_values:
+            symbol = settings.symbol                                   # the user named one that exists
+        elif len(ref.symbol_values) == 1 or any(plain(v) in ("nifty", "nifty50") for v in ref.symbol_values):
+            symbol = _pick_symbol(ref.symbol_values)
+        else:
+            raise ConfigError(
+                f"Table {ref.name!r} holds several symbols ({', '.join(ref.symbol_values)}) and none of them is "
+                f"{settings.symbol!r}. Set `symbol = \"...\"` in patterniq.toml. {where}"
+            )
+    merged = replace(
+        auto,
+        source=settings.source, db_url=settings.db_url, symbol=symbol,
+        stored_tz=settings.stored_tz, display_tz=settings.display_tz,
+        config_path=settings.config_path, config_found=settings.config_found,
+    )
+    if use_single:
+        layout = f"single table {ref.name!r} with columns time={merged.columns.ts}, timeframe={merged.columns.timeframe}"
+        stored = ", ".join(f"{k}={v!r}" for k, v in merged.timeframe_values.items()) or "none matched"
+        layout += f"; timeframe labels: {stored}"
+    else:
+        layout = "one table per timeframe: " + ", ".join(f"{k}={v!r}" for k, v in merged.tables.items())
+    note = f"auto-detected from the database: {layout}; symbol {merged.symbol!r}"
+    if len(ref.symbol_values) > 1:
+        note += f" (stored symbols: {', '.join(ref.symbol_values)})"
+    return merged, note

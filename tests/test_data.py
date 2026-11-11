@@ -300,3 +300,101 @@ def test_a_few_repeated_bars_are_tolerated(tmp_path):
 def test_symbol_guess_never_prefers_a_lookalike_index(values, expected):
     from patterniq.data.introspect import _pick_symbol
     assert _pick_symbol(values) == expected
+
+
+# ------------------------------------------------------------------ zero-config: layout read from the database
+from patterniq.config import ConfigError  # noqa: E402
+from patterniq.diagnose import diagnose  # noqa: E402
+
+
+def _bare(**kw):
+    """Settings as if the user only set PATTERNIQ_DB_URL and has no patterniq.toml."""
+    return Settings(source="postgres", db_url="sqlite://", **kw)
+
+
+def test_zero_config_single_table_picks_the_nifty_rows(tmp_path):
+    eng = _ohlcv_engine(tmp_path, symbols=("BANKNIFTY", "NIFTY50"))
+    src = SqlSource(_bare(), engine=eng)
+    assert src.s.single_table == "ohlcv" and src.s.symbol == "NIFTY50" and src.s.columns.symbol == "symbol"
+    assert "auto-detected" in src.auto_note and "BANKNIFTY" in src.auto_note
+    assert src.timeframes() == ["15m", "1d"]
+    got = src.load("15m", limit=4)
+    assert abs(got.close.iloc[-1] - REF["15m"].close.iloc[-1]) < 1e-9          # Nifty, not BankNifty x2.2
+    assert src.load("1d", limit=3).index[-1] == REF["1d"].index[-1]
+
+
+def test_zero_config_respects_an_explicit_symbol_that_exists(tmp_path):
+    eng = _ohlcv_engine(tmp_path, symbols=("BANKNIFTY", "NIFTY50"))
+    src = SqlSource(_bare(symbol="BANKNIFTY"), engine=eng)
+    assert src.load("15m", limit=1).close.iloc[-1] == pytest.approx(REF["15m"].close.iloc[-1] * 2.2)
+
+
+def test_zero_config_refuses_to_guess_between_unrelated_symbols(tmp_path):
+    eng = _ohlcv_engine(tmp_path, symbols=("RELIANCE", "TCS"))
+    with pytest.raises(ConfigError, match="RELIANCE, TCS"):
+        SqlSource(_bare(), engine=eng)
+
+
+def test_zero_config_per_timeframe_tables(sqlite_engine):
+    src = SqlSource(_bare(), engine=sqlite_engine)            # tables: nifty_15min, nifty_daily, epoch_15
+    assert src.s.tables.get("15m") == "nifty_15min" and src.s.tables.get("1d") == "nifty_daily"
+    assert (src.load("15m", limit=3).index == REF["15m"].index[-3:]).all()
+
+
+def test_zero_config_with_no_candle_table_explains_itself(tmp_path):
+    eng = sa.create_engine(f"sqlite:///{tmp_path/'empty.db'}")
+    pd.DataFrame({"a": [1]}).to_sql("unrelated", eng, index=False)
+    with pytest.raises(ConfigError, match="open/high/low/close"):
+        SqlSource(_bare(), engine=eng)
+
+
+def test_zero_config_refuses_when_several_tables_could_be_the_candles(tmp_path):
+    eng = sa.create_engine(f"sqlite:///{tmp_path/'two.db'}")
+    for name in ("candles_a", "candles_b"):
+        d = REF["15m"].reset_index().rename(columns={"time": "ts"}); d["timeframe"] = "15m"
+        d.to_sql(name, eng, index=False)
+    with pytest.raises(ConfigError, match="candles_a, candles_b"):
+        SqlSource(_bare(), engine=eng)
+
+
+# ------------------------------------------------------------------ patterniq check
+def _report(settings, eng):
+    lines, ok = diagnose(settings, source=SqlSource(settings, engine=eng))
+    return "\n".join(lines), ok
+
+
+def test_check_reports_row_counts_when_everything_matches(tmp_path):
+    text, ok = _report(_bare(), _ohlcv_engine(tmp_path))
+    assert ok and f"15m: {len(REF['15m'])} rows" in text and "auto-detected" in text and "1m: 0 rows" in text
+
+
+def test_check_explains_a_symbol_mismatch_with_the_stored_values(tmp_path):
+    s = Settings(source="postgres", db_url="sqlite://", single_table="ohlcv", symbol="NIFTY 50",
+                 timeframe_values={"15m": "15", "1d": "D"}, columns=ColumnMap(ts="datetime", timeframe="timeframe", symbol="symbol"))
+    text, ok = _report(s, _ohlcv_engine(tmp_path))
+    assert not ok and "0 rows" in text and "stored symbol values: NIFTY50" in text and "case matters" in text
+
+
+def test_check_explains_a_timeframe_label_mismatch(tmp_path):
+    s = Settings(source="postgres", db_url="sqlite://", single_table="ohlcv", symbol="NIFTY50",
+                 columns=ColumnMap(ts="datetime", timeframe="timeframe", symbol="symbol"))      # no [timeframe_values]
+    text, ok = _report(s, _ohlcv_engine(tmp_path))
+    assert not ok and "timeframe '15m'" in text and "stored timeframe values: 15, D" in text
+
+
+def test_check_flags_a_missing_config_file_and_the_notepad_txt_mistake(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATTERNIQ_DB_URL", "postgresql://u:p@127.0.0.1:1/x")
+    cfg = tmp_path / "patterniq.toml"
+    s = Settings.load(cfg)
+    assert not s.config_found and "No config file was found" in s.where_is_config()
+    (tmp_path / "patterniq.toml.txt").write_text("source = 'postgres'")
+    assert "Notepad added '.txt'" in Settings.load(cfg).where_is_config()
+    (cfg).write_text("symbol = 'X'")
+    assert Settings.load(cfg).where_is_config().startswith("Config file in use")
+
+
+def test_check_reports_connection_failures_without_leaking_the_password():
+    s = Settings(source="postgres", db_url="postgresql://user:SECRETPW@127.0.0.1:1/nope", single_table="ohlcv")
+    lines, ok = diagnose(s)
+    text = "\n".join(lines)
+    assert not ok and "connection: FAILED" in text and "SECRETPW" not in text

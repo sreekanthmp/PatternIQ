@@ -6,9 +6,12 @@ import argparse
 import sys
 
 import pandas as pd
+from sqlalchemy.exc import SQLAlchemyError
 
 from .analysis import ALL_CATEGORIES, analyze
-from .config import TIMEFRAMES, Settings
+import tomllib
+
+from .config import TIMEFRAMES, ConfigError, Settings
 from .data import make_source, read_ohlcv_csv
 from .patterns.catalog import CATALOG
 from .stats import scorecard
@@ -124,12 +127,23 @@ def cmd_inspect(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_check(args, settings: Settings) -> int:
+    from .diagnose import diagnose
+
+    lines, ok = diagnose(settings)
+    print("\n".join(lines))
+    print("\nRESULT: " + ("OK - data found, `patterniq serve` should show charts." if ok else "no usable data found - see the lines above."))
+    return 0 if ok else 1
+
+
 def cmd_serve(args, settings: Settings) -> int:
     import uvicorn
 
     from .api import create_app
 
     app = create_app(settings)
+    if app.state.auto_note:
+        print(app.state.auto_note)
     print(f"PatternIQ on http://{args.host}:{args.port}  (data source: {settings.source})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
@@ -167,14 +181,30 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--columns", action="store_true", help="print columns of every table")
     sp.set_defaults(fn=cmd_inspect)
 
+    sp = sub.add_parser("check", help="diagnose the configuration: what is found, and why not")
+    sp.set_defaults(fn=cmd_check)
+
     sp = sub.add_parser("serve", help="run the API + web UI")
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8000)
     sp.set_defaults(fn=cmd_serve)
 
     args = p.parse_args(argv)
-    settings = Settings.load(args.config)
-    return args.fn(args, settings)
+    try:
+        settings = Settings.load(args.config)
+        return args.fn(args, settings)
+    except tomllib.TOMLDecodeError as e:
+        print(f"error: patterniq.toml is not valid TOML ({e}). It must contain only the config text "
+              "(the suggested block from `inspect-db`), not the table listing above it.", file=sys.stderr)
+        return 2
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except SQLAlchemyError as e:
+        text = str(getattr(e, "orig", None) or e).strip().splitlines()
+        print(f"error: cannot use the database: {text[0] if text else type(e).__name__}\n"
+              "Run `patterniq check` for a step-by-step diagnosis.", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

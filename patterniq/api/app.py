@@ -65,7 +65,9 @@ class _TTLCache:
 def create_app(settings: Settings | None = None, source: DataSource | None = None) -> FastAPI:
     cfg = settings or Settings.load()
     src = source or make_source(cfg)
+    cfg = getattr(src, "s", cfg)  # a SQL source may have filled in the layout / symbol from the database
     app = FastAPI(title="PatternIQ", version="0.1.0")
+    app.state.auto_note = getattr(src, "auto_note", None)
     bounds_cache = _TTLCache(ttl=30)
     stats_cache = _TTLCache(ttl=300, maxsize=8)
 
@@ -82,7 +84,11 @@ def create_app(settings: Settings | None = None, source: DataSource | None = Non
     def tf_or_default(tf: str | None) -> str:
         tfs = guarded(src.timeframes)
         if not tfs:
-            raise HTTPException(404, "no timeframes available from the data source")
+            raise HTTPException(
+                404,
+                "no timeframes available from the data source: no rows matched the configured table, timeframe "
+                "labels and symbol. Run `patterniq check` in a terminal to see why.",
+            )
         if tf is None:
             return "15m" if "15m" in tfs else tfs[0]
         if tf not in tfs:

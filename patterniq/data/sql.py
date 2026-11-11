@@ -39,6 +39,11 @@ class SqlSource:
         self.engine = engine or sa.create_engine(normalize_db_url(settings.db_url), pool_pre_ping=True)
         if self.engine.dialect.name == "postgresql":
             self.engine = self.engine.execution_options(postgresql_readonly=True)
+        self.auto_note: str | None = None
+        if not settings.has_layout():  # no config needed: read the layout from the database itself
+            from .introspect import autoconfigure
+
+            self.s, self.auto_note = autoconfigure(settings, self.engine)
         self._kind_cache: dict[str, str] = {}
 
     # ---- schema helpers ----------------------------------------------------------------
