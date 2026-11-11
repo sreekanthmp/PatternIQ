@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patterniq"
+version = "0.1.0"
+description = "Pattern recogniser for manual trading: candlestick patterns, chart patterns, support/resistance and trend structure."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pandas>=2.1",
+  "numpy>=1.26",
+  "sqlalchemy>=2.0",
+  "psycopg2-binary>=2.9",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+patterniq = "patterniq.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["patterniq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

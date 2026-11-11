@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.env
+patterniq.toml
+node_modules/
+web/dist/
+*.csv
+!tests/fixtures/*.csv

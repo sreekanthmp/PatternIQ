@@ -1,0 +1,43 @@
+# Copy to patterniq.toml (git-ignored) and adjust. `patterniq inspect-db` prints a starting point.
+# Keep the connection string out of this file: export PATTERNIQ_DB_URL instead, e.g.
+#   export PATTERNIQ_DB_URL="postgresql://user:password@localhost:5432/prism"
+
+source = "postgres"        # postgres | csv | demo   (default: postgres if PATTERNIQ_DB_URL is set, else demo)
+symbol = "NIFTY50"         # label in the UI; also the filter value if [columns] symbol is set
+
+stored_tz  = "Asia/Kolkata"  # timezone of *naive* timestamps in your DB / CSV (use "UTC" if you store UTC)
+display_tz = "Asia/Kolkata"  # timezone shown on the chart
+
+# [database]
+# schema = "public"
+
+# ---- Layout 1: one table per timeframe ------------------------------------------------
+[tables]
+1m  = "nifty50_1min"
+5m  = "nifty50_5min"
+15m = "nifty50_15min"
+1d  = "nifty50_daily"
+# or a template instead of the table above:
+# table_template = "nifty50_{tf}"      # {tf} is 1m / 5m / 15m / 1d
+
+# ---- Layout 2: a single table with a timeframe column ---------------------------------
+# single_table = "candles"
+# [timeframe_values]                   # only if the stored values differ from 1m/5m/15m/1d
+# 1m = "1"
+# 5m = "5"
+# 15m = "15"
+# 1d = "D"
+
+[columns]
+ts     = "timestamp"       # timestamp / timestamptz / date / epoch seconds / epoch milliseconds
+open   = "open"
+high   = "high"
+low    = "low"
+close  = "close"
+volume = "volume"          # optional; remove the line if there is no volume column
+# symbol    = "symbol"     # only if one table holds several instruments (filtered by `symbol` above)
+# timeframe = "interval"   # only for the single-table layout
+
+# ---- CSV instead of a database --------------------------------------------------------
+# source  = "csv"
+# csv_dir = "./data"       # contains 1m.csv / 5m.csv / 15m.csv / 1d.csv; missing ones are derived from finer ones
